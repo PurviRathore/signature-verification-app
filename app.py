@@ -34,7 +34,7 @@ def load_model():
     base = timm.create_model("xception", pretrained=False)
     base.conv1 = nn.Conv2d(1, base.conv1.out_channels, kernel_size=3, stride=2, padding=1, bias=False)
     model = SiameseRegressor(base)
-    model.load_state_dict(torch.load("siamese_model.pth", map_location=device))
+    model.load_state_dict(torch.load("/content/drive/MyDrive/Colab Notebooks/siamese_similarity_model (1).pth", map_location=device))
     model.eval()
     return model.to(device)
 
