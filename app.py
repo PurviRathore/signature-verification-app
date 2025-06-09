@@ -1,4 +1,3 @@
-
 import streamlit as st
 import torch
 import torch.nn as nn
@@ -9,18 +8,18 @@ import timm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
-])
-
 class SiameseRegressor(nn.Module):
     def __init__(self, base_model):
         super(SiameseRegressor, self).__init__()
         self.base = base_model
         self.base.fc = nn.Identity()
-    
+        self.similarity_head = nn.Sequential(
+            nn.Linear(self.base.num_features, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1),
+            nn.Sigmoid()
+        )
+
     def forward_once(self, x):
         return self.base(x)
 
@@ -30,48 +29,50 @@ class SiameseRegressor(nn.Module):
         cos_sim = F.cosine_similarity(emb1, emb2)
         return cos_sim.unsqueeze(1)
 
-def load_model(path):
-    base = timm.create_model("xception", pretrained=True)
+@st.cache_resource
+def load_model():
+    base = timm.create_model("xception", pretrained=False)
     base.conv1 = nn.Conv2d(1, base.conv1.out_channels, kernel_size=3, stride=2, padding=1, bias=False)
-    with torch.no_grad():
-        base.conv1.weight[:, 0] = base.conv1.weight.mean(dim=1)
     model = SiameseRegressor(base)
-    model.load_state_dict(torch.load(path, map_location=device))
-    model.to(device).eval()
-    return model
+    model.load_state_dict(torch.load("siamese_model.pth", map_location=device))
+    model.eval()
+    return model.to(device)
 
-def get_color_and_comment(dissimilarity):
-    if dissimilarity < 0.2:
-        return "#00cc66", "✅ Signatures are very similar (Likely Genuine)"
-    elif dissimilarity < 0.4:
-        return "#ffcc00", "🟡 Somewhat similar"
-    elif dissimilarity < 0.6:
-        return "#ff9933", "🟠 Low similarity (Could be forged)"
-    else:
-        return "#cc0000", "❌ Highly dissimilar (Likely Forged)"
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,))
+])
 
-st.set_page_config(page_title="Signature Verifier", layout="centered")
-st.title("🖊️ Signature Verification App")
-st.markdown("Upload two signature images to compare similarity.")
+def preprocess(img):
+    img = img.convert("L")
+    return transform(img).unsqueeze(0).to(device)
 
-uploaded1 = st.file_uploader("Upload Signature 1", type=["png", "jpg", "jpeg"])
-uploaded2 = st.file_uploader("Upload Signature 2", type=["png", "jpg", "jpeg"])
+st.title("🖊️ Signature Similarity Checker")
+img1_file = st.file_uploader("Upload Image 1", type=["png", "jpg", "jpeg"])
+img2_file = st.file_uploader("Upload Image 2", type=["png", "jpg", "jpeg"])
 
-if uploaded1 and uploaded2:
-    img1 = Image.open(uploaded1).convert("L")
-    img2 = Image.open(uploaded2).convert("L")
-    
-    input1 = transform(img1).unsqueeze(0).to(device)
-    input2 = transform(img2).unsqueeze(0).to(device)
+if img1_file and img2_file:
+    img1 = Image.open(img1_file)
+    img2 = Image.open(img2_file)
+    st.image([img1, img2], caption=["Image 1", "Image 2"], width=150)
 
-    model = load_model("model/siamese_similarity_model.pth")
-
+    model = load_model()
     with torch.no_grad():
-        similarity = model(input1, input2).item()
+        t1 = preprocess(img1)
+        t2 = preprocess(img2)
+        score = model(t1, t2).item()
+        dissim = 1 - score
 
-    dissimilarity = 1 - similarity
-    color, comment = get_color_and_comment(dissimilarity)
+    if score > 0.8:
+        verdict = "🟢 Highly Similar - Likely Genuine"
+    elif score > 0.6:
+        verdict = "🟡 Moderately Similar - Could be Genuine"
+    elif score > 0.4:
+        verdict = "🟠 Low Similarity - Possibly Forged"
+    else:
+        verdict = "🔴 Highly Dissimilar - Likely Forged"
 
-    st.image([img1, img2], caption=["Signature 1", "Signature 2"], width=150)
-    st.markdown(f"### 🔍 Dissimilarity: **{dissimilarity * 100:.2f}%**")
-    st.markdown(f"<div style='background-color:{color};padding:10px;border-radius:10px;text-align:center;color:white;font-weight:bold;'>{comment}</div>", unsafe_allow_html=True)
+    st.metric("Similarity Score", f"{score*100:.2f}%")
+    st.metric("Dissimilarity", f"{dissim*100:.2f}%")
+    st.success(f"Verdict: {verdict}")
